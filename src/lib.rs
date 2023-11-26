@@ -24,6 +24,7 @@ unsafe fn configure_flash(secure_flash_kb: usize) {
             w.write().enable();
             w.execute().enable();
             if region_start < non_secure_flash_start {
+                defmt::trace!("Flash Region {}: secure", i);
                 w.secattr().secure()
             } else {
                 w.secattr().non_secure()
@@ -43,6 +44,7 @@ unsafe fn configure_ram(secure_ram_kb: usize) {
             w.write().enable();
             w.execute().enable();
             if region_start < non_secure_ram_start {
+                defmt::trace!("RAM Region {}: secure", i);
                 w.secattr().secure()
             } else {
                 w.secattr().non_secure()
@@ -113,7 +115,6 @@ pub fn configure_secure_regions(secure_flash_kb: usize, secure_ram_kb: usize) {
     }
 }
 
-#[allow(non_upper_case_globals)]
 pub fn non_secure_jump(reset_vector: u32) -> ! {
     let mut cpu = cortex_m::Peripherals::take().unwrap();
 
@@ -145,42 +146,45 @@ pub fn non_secure_jump(reset_vector: u32) -> ! {
         control.set_spsel(Spsel::Msp);
         cortex_m::register::control::write_ns(control);
 
-        const VECTKEY_Pos: u32 = 16;
-        const VECTKEY_Msk: u32 = 0xFFFF << VECTKEY_Pos;
-        const VECTKEY_PERMIT_WRITE: u32 = (0x05FA << VECTKEY_Pos) & VECTKEY_Msk;
+        #[allow(non_upper_case_globals)]
+        {
+            const VECTKEY_Pos: u32 = 16;
+            const VECTKEY_Msk: u32 = 0xFFFF << VECTKEY_Pos;
+            const VECTKEY_PERMIT_WRITE: u32 = (0x05FA << VECTKEY_Pos) & VECTKEY_Msk;
 
-        const PRIS_Pos: u32 = 14;
-        const PRIS_Msk: u32 = 1 << PRIS_Pos;
+            const PRIS_Pos: u32 = 14;
+            const PRIS_Msk: u32 = 1 << PRIS_Pos;
 
-        const BFHFNMINS_Pos: u32 = 13;
-        const BFHFNMINS_Msk: u32 = 1 << BFHFNMINS_Pos;
+            const BFHFNMINS_Pos: u32 = 13;
+            const BFHFNMINS_Msk: u32 = 1 << BFHFNMINS_Pos;
 
-        const SYSRESETREQS_Pos: u32 = 3;
-        const SYSRESETREQS_Msk: u32 = 1 << SYSRESETREQS_Pos;
+            const SYSRESETREQS_Pos: u32 = 3;
+            const SYSRESETREQS_Msk: u32 = 1 << SYSRESETREQS_Pos;
 
-        // Enable secure fault
-        cpu.SCB.enable(Exception::SecureFault);
+            // Enable secure fault
+            cpu.SCB.enable(Exception::SecureFault);
 
-        // Prioritize secure exceptions
-        cpu.SCB.aircr.modify(|bits| {
-            let aircr_payload = bits & (!VECTKEY_Msk);
-            let aircr_payload = aircr_payload | PRIS_Msk;
-            VECTKEY_PERMIT_WRITE | aircr_payload
-        });
+            // Prioritize secure exceptions
+            cpu.SCB.aircr.modify(|bits| {
+                let aircr_payload = bits & (!VECTKEY_Msk);
+                let aircr_payload = aircr_payload | PRIS_Msk;
+                VECTKEY_PERMIT_WRITE | aircr_payload
+            });
 
-        // Non-banked exceptions should target non-secure
-        cpu.SCB.aircr.modify(|bits| {
-            let aircr_payload = bits & (!VECTKEY_Msk);
-            let aircr_payload = aircr_payload | BFHFNMINS_Msk;
-            VECTKEY_PERMIT_WRITE | aircr_payload
-        });
+            // Non-banked exceptions should target non-secure
+            cpu.SCB.aircr.modify(|bits| {
+                let aircr_payload = bits & (!VECTKEY_Msk);
+                let aircr_payload = aircr_payload | BFHFNMINS_Msk;
+                VECTKEY_PERMIT_WRITE | aircr_payload
+            });
 
-        // Non-secure code may request reset
-        cpu.SCB.aircr.modify(|bits| {
-            let aircr_payload = bits & (!VECTKEY_Msk);
-            let aircr_payload = aircr_payload & (!SYSRESETREQS_Msk);
-            VECTKEY_PERMIT_WRITE | aircr_payload
-        });
+            // Non-secure code may request reset
+            cpu.SCB.aircr.modify(|bits| {
+                let aircr_payload = bits & (!VECTKEY_Msk);
+                let aircr_payload = aircr_payload & (!SYSRESETREQS_Msk);
+                VECTKEY_PERMIT_WRITE | aircr_payload
+            });
+        }
 
         // Disable SAU, and let SPU have precedence over it
         cpu.SAU.ctrl.write(cortex_m::peripheral::sau::Ctrl(0));
