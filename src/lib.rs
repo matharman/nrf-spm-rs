@@ -68,7 +68,7 @@ unsafe fn configure_peripherals_nonsecure() {
         let nvic_itns_n = id / NVIC_ITNS_WIDTH;
         let itns_m = id % NVIC_ITNS_WIDTH;
 
-        // defmt::trace!("Periph ID {} NVIC->ITNS[{}]:{}", id, nvic_itns_n, itns_m);
+        defmt::trace!("Periph ID {} NVIC->ITNS[{}]:{}", id, nvic_itns_n, itns_m);
 
         let nvic_itns_base = 0xE000E380 as *mut u32;
         let itns = nvic_itns_base.add(nvic_itns_n);
@@ -127,9 +127,9 @@ pub fn non_secure_jump(reset_vector: u32) -> ! {
         let ns_reset_vector = reset_vector as *const u32;
         let ns_msp = *ns_reset_vector;
         let ns_vtor = *ns_reset_vector.add(1);
-        defmt::println!("NS Reset Vector {:#X}", ns_reset_vector);
-        defmt::println!("NS MSP {:#X}", ns_msp);
-        defmt::println!("NS VTOR {:#X}", ns_vtor);
+        defmt::info!("NS Reset Vector {:#X}", ns_reset_vector);
+        defmt::info!("NS MSP {:#X}", ns_msp);
+        defmt::info!("NS VTOR {:#X}", ns_vtor);
 
         const NS_OFFSET: u32 = 0x00020000;
         let scb_ns_address: u32 = cortex_m::peripheral::SCB::PTR as u32 + NS_OFFSET;
@@ -195,7 +195,7 @@ pub fn non_secure_jump(reset_vector: u32) -> ! {
 
         cpu.SCB.set_fpu_access_mode(FpuAccessMode::Enabled);
 
-        defmt::println!("Preparing to jump...");
+        defmt::info!("Preparing to jump...");
 
         let ns_reset_vector: extern "C-cmse-nonsecure-call" fn() -> ! =
             core::mem::transmute::<_, _>(ns_reset_vector);
