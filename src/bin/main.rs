@@ -1,16 +1,14 @@
 #![no_main]
 #![no_std]
 
-use defmt;
-use nrf_spm_rs as _;
+use nrf_spm_rs::{configure_secure_regions, non_secure_jump};
 
 #[cortex_m_rt::entry]
 fn main() -> ! {
-    defmt::println!("Hello, world!");
-    loop {}
-}
+    let ns_jump_addr = 0x8000;
+    const NS_FLASH_KB: usize = 32;
+    const NS_RAM_KB: usize = 32;
 
-#[panic_handler]
-fn panic(_info: &core::panic::PanicInfo) -> ! {
-    loop {}
+    configure_secure_regions(NS_FLASH_KB, NS_RAM_KB);
+    non_secure_jump(ns_jump_addr);
 }

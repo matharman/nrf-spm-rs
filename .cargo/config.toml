@@ -1,5 +1,5 @@
 # Relative to the Cargo.toml
-# paths = ["../cortex-m"]
+paths = ["../cortex-m"]
 
 [target.'cfg(all(target_arch = "arm", target_os = "none"))']
 runner = "probe-rs run --chip nRF9160_XXAA"
