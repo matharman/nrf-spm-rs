@@ -11,7 +11,13 @@ cortex-m-rt = "0.7"
 defmt = "0.3"
 defmt-rtt = "0.4"
 nrf9160-pac = "0.12"
-panic-probe = { version = "0.3", features = ["print-defmt"] }
 
 [patch.crates-io]
 cortex-m = { path = "../cortex-m" }
+
+[profile.release]
+codegen-units = 1 # better optimizations
+debug = true # symbols are nice and they don't increase the size on Flash
+lto = true # better optimizations
+opt-level = "s"
+#panic = "abort"
