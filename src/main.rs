@@ -7,11 +7,11 @@ use cortex_m::{
     register::control::{Npriv, Spsel},
 };
 use cortex_m_rt::exception;
-use defmt;
+// use defmt;
 use nrf9160_pac as pac;
 // use nrf_spm_rs::{configure_secure_regions, non_secure_jump};
 
-use defmt_rtt as _;
+// use defmt_rtt as _;
 
 #[panic_handler]
 fn panic(_info: &core::panic::PanicInfo) -> ! {
@@ -26,11 +26,18 @@ fn panic(_info: &core::panic::PanicInfo) -> ! {
 
 #[cortex_m_rt::exception]
 fn SecureFault() {
-    defmt::panic!("received secure fault");
+    cortex_m::interrupt::disable();
+
+    // Make this a hardfault. This has a lot of advantages:
+    // - No interrupt can interrupt a hardfault
+    // - Recursion cannot happen because the hardware prevents that
+    // - It is the natural endpoint for program failures on cortex-m
+    cortex_m::asm::udf();
 }
 
 const NON_SECURE_FLASH_OFFSET: usize = 64 * 1024;
-const NON_SECURE_RAM_OFFSET: usize = 16 * 1024;
+// const NON_SECURE_RAM_OFFSET: usize = 16 * 1024;
+const NON_SECURE_RAM_OFFSET: usize = 0;
 
 #[cortex_m_rt::entry]
 fn main() -> ! {
@@ -44,20 +51,21 @@ fn main() -> ! {
     let mut cpu = cortex_m::Peripherals::take().unwrap();
 
     unsafe {
-        let spu = chip.SPU_S;
-
         const FLASH_SIZE: usize = 1024 * 1024;
         const SPU_FLASH_REGION_SIZE: usize = 32 * 1024;
 
         const RAM_SIZE: usize = 256 * 1024;
         const SPU_RAM_REGION_SIZE: usize = 8 * 1024;
 
-        for (i, region_start) in (0..FLASH_SIZE).step_by(SPU_FLASH_REGION_SIZE).enumerate() {
-            spu.flashregion[i].perm.write(|w| {
+        const NS_FLASH_REGION: usize = NON_SECURE_FLASH_OFFSET / SPU_FLASH_REGION_SIZE;
+        const NS_RAM_REGION: usize = NON_SECURE_RAM_OFFSET / SPU_RAM_REGION_SIZE;
+
+        for (i, region) in chip.SPU_S.flashregion.iter().enumerate() {
+            region.perm.write(|w| {
                 w.read().enable();
                 w.write().enable();
                 w.execute().enable();
-                if region_start < NON_SECURE_FLASH_OFFSET {
+                if i < NS_FLASH_REGION {
                     w.secattr().secure()
                 } else {
                     w.secattr().non_secure()
@@ -65,15 +73,12 @@ fn main() -> ! {
             });
         }
 
-        spu.flashnsc[0].region.write(|w| w.region().bits(1));
-        spu.flashnsc[0].size.write(|w| w.size().bits(1));
-
-        for (i, region_start) in (0..RAM_SIZE).step_by(SPU_RAM_REGION_SIZE).enumerate() {
-            spu.ramregion[i].perm.write(|w| {
+        for (i, region) in chip.SPU_S.ramregion.iter().enumerate() {
+            region.perm.write(|w| {
                 w.read().enable();
                 w.write().enable();
                 w.execute().enable();
-                if region_start < NON_SECURE_RAM_OFFSET {
+                if i < NS_RAM_REGION {
                     w.secattr().secure()
                 } else {
                     w.secattr().non_secure()
@@ -81,62 +86,44 @@ fn main() -> ! {
             });
         }
 
-        spu.dppi[0].perm.write(|w| w.bits(0));
-        spu.gpioport[0].perm.write(|w| w.bits(0));
+        chip.SPU_S.dppi[0].perm.write(|w| w.bits(0));
+        chip.SPU_S.gpioport[0].perm.write(|w| w.bits(0));
 
         // NVIC->ITNS[0] to NVIC->ITNS[15]
         // Each of these registers is 32 bits wide.
         // Bit n in NVIC->ITNS[m] corresponds to IRQ number 32n + m
-        unsafe fn nvic_itns_set_non_secure(id: usize) {
-            const NVIC_ITNS_WIDTH: usize = 32;
-
-            let nvic_itns_n = id / NVIC_ITNS_WIDTH;
-            let itns_m = id % NVIC_ITNS_WIDTH;
-
-            // defmt::trace!("Periph ID {} NVIC->ITNS[{}]:{}", id, nvic_itns_n, itns_m);
-
-            let nvic_itns_base = 0xE000E380 as *mut u32;
-            let itns = nvic_itns_base.add(nvic_itns_n);
-
-            *itns |= 1 << itns_m;
+        // Set to 1 for non secure, unimplemented IRQs are write-ignored
+        let nvic_itns_base = 0xE000_E380 as *mut u32;
+        for i in 0..16 {
+            let nvic_itns = nvic_itns_base.add(i);
+            *nvic_itns = u32::MAX;
         }
 
-        for id in 3..spu.periphid.len() {
+        for id in 3..chip.SPU_S.periphid.len() {
             // Special case for GPIOTE1's which has incorrect PERM properties.
             const GPIOTE1_ID: usize = 49;
 
-            let bits_on_rst = spu.periphid[id].perm.read();
+            chip.SPU_S.periphid[id].perm.modify(|r, w| {
+                let present = r.present().is_is_present();
+                let split = r.securemapping().is_split();
+                let usel = r.securemapping().is_user_selectable();
+                let configurable = present && (split || usel);
 
-            let present = bits_on_rst.present().is_is_present();
-            let split = bits_on_rst.securemapping().is_split();
-            let usel = bits_on_rst.securemapping().is_user_selectable();
-            let configurable = present && (split || usel);
-
-            if configurable || GPIOTE1_ID == id {
-                nvic_itns_set_non_secure(id);
-
-                spu.periphid[id].perm.modify(|_r, w| {
+                if configurable || GPIOTE1_ID == id {
                     w.secattr().non_secure();
-                    w.dmasec().non_secure()
-                });
-            }
+                    w.dmasec().non_secure();
+                }
 
-            let bits_after = spu.periphid[id].perm.read();
-
-            defmt::println!(
-                "Periph ID {}: {:#X} -> {:#X}",
-                id,
-                bits_on_rst.bits(),
-                bits_after.bits()
-            );
+                w
+            });
         }
 
-        let ns_vector_table_addr = 0x00010000_u32 as *const u32;
+        let ns_vector_table_addr = NON_SECURE_FLASH_OFFSET as *const u32;
         let ns_msp: u32 = *ns_vector_table_addr;
         let ns_vtor: u32 = *ns_vector_table_addr.add(1);
 
-        defmt::info!("NS MSP {:#X}", ns_msp);
-        defmt::info!("NS VTOR {:#X}", ns_vtor);
+        // defmt::info!("NS MSP {:#X}", ns_msp);
+        // defmt::info!("NS VTOR {:#X}", ns_vtor);
 
         const NS_OFFSET: u32 = 0x00020000;
         let scb_ns_address: u32 = cortex_m::peripheral::SCB::PTR as u32 + NS_OFFSET;
@@ -153,51 +140,55 @@ fn main() -> ! {
         control.set_spsel(Spsel::Msp);
         cortex_m::register::control::write_ns(control);
 
-        const VECTKEY_Pos: u32 = 16;
-        const VECTKEY_Msk: u32 = 0xFFFF << VECTKEY_Pos;
-        const VECTKEY_PERMIT_WRITE: u32 = (0x05FA << VECTKEY_Pos) & VECTKEY_Msk;
+        #[allow(non_upper_case_globals)]
+        {
+            const VECTKEY_Pos: u32 = 16;
+            const VECTKEY_Msk: u32 = 0xFFFF << VECTKEY_Pos;
+            const VECTKEY_PERMIT_WRITE: u32 = (0x05FA << VECTKEY_Pos) & VECTKEY_Msk;
 
-        const PRIS_Pos: u32 = 14;
-        const PRIS_Msk: u32 = 1 << PRIS_Pos;
+            const PRIS_Pos: u32 = 14;
+            const PRIS_Msk: u32 = 1 << PRIS_Pos;
 
-        const BFHFNMINS_Pos: u32 = 13;
-        const BFHFNMINS_Msk: u32 = 1 << BFHFNMINS_Pos;
+            const BFHFNMINS_Pos: u32 = 13;
+            const BFHFNMINS_Msk: u32 = 1 << BFHFNMINS_Pos;
 
-        const SYSRESETREQS_Pos: u32 = 3;
-        const SYSRESETREQS_Msk: u32 = 1 << SYSRESETREQS_Pos;
+            const SYSRESETREQS_Pos: u32 = 3;
+            const SYSRESETREQS_Msk: u32 = 1 << SYSRESETREQS_Pos;
 
-        // Enable secure fault
-        cpu.SCB.enable(Exception::SecureFault);
+            // Enable secure fault
+            cpu.SCB.enable(Exception::SecureFault);
 
-        // Prioritize secure exceptions
-        cpu.SCB.aircr.modify(|bits| {
-            let aircr_payload = bits & (!VECTKEY_Msk);
-            let aircr_payload = aircr_payload | PRIS_Msk;
-            VECTKEY_PERMIT_WRITE | aircr_payload
-        });
+            // Prioritize secure exceptions
+            cpu.SCB.aircr.modify(|bits| {
+                let aircr_payload = bits & (!VECTKEY_Msk);
+                let aircr_payload = aircr_payload | PRIS_Msk;
+                VECTKEY_PERMIT_WRITE | aircr_payload
+            });
 
-        // Non-banked exceptions should target non-secure
-        cpu.SCB.aircr.modify(|bits| {
-            let aircr_payload = bits & (!VECTKEY_Msk);
-            let aircr_payload = aircr_payload | BFHFNMINS_Msk;
-            VECTKEY_PERMIT_WRITE | aircr_payload
-        });
+            // Non-banked exceptions should target non-secure
+            cpu.SCB.aircr.modify(|bits| {
+                let aircr_payload = bits & (!VECTKEY_Msk);
+                let aircr_payload = aircr_payload | BFHFNMINS_Msk;
+                VECTKEY_PERMIT_WRITE | aircr_payload
+            });
 
-        // Non-secure code may request reset
-        cpu.SCB.aircr.modify(|bits| {
-            let aircr_payload = bits & (!VECTKEY_Msk);
-            let aircr_payload = aircr_payload & (!SYSRESETREQS_Msk);
-            VECTKEY_PERMIT_WRITE | aircr_payload
-        });
+            // Non-secure code may request reset
+            cpu.SCB.aircr.modify(|bits| {
+                let aircr_payload = bits & (!VECTKEY_Msk);
+                let aircr_payload = aircr_payload & (!SYSRESETREQS_Msk);
+                VECTKEY_PERMIT_WRITE | aircr_payload
+            });
+        }
 
         // Disable SAU, and let SPU have precedence over it
         cpu.SAU.ctrl.write(cortex_m::peripheral::sau::Ctrl(0));
         cpu.SAU.ctrl.write(cortex_m::peripheral::sau::Ctrl(2));
 
+        cpu.SCB.set_fpu_access_mode(FpuAccessMode::Enabled);
+        chip.NVMC_S.icachecnf.modify(|_, w| w.cacheen().enabled());
+
         cortex_m::asm::dsb();
         cortex_m::asm::isb();
-
-        cpu.SCB.set_fpu_access_mode(FpuAccessMode::Enabled);
 
         // Create a Non-Secure function pointer to the address of the second entry of the Non
         // Secure Vector Table.
